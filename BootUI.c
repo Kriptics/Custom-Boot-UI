@@ -37,6 +37,9 @@
 #define LOAD_HOLD      600000
 
 #define ICON_KEY_THRESH    30
+#define PREF_GOP_W      2560
+#define PREF_GOP_H      1600
+#define PIXELATE_ICON_SIZE    44
 
 // Animation tick
 // NOTE: UEFI GOP does not expose a reliable refresh-rate control, so we target a
@@ -44,7 +47,6 @@
 // If the platform can't keep up, the UI still works; it just updates less often.
 #define TARGET_FPS      240
 #define ANIM_INTERVAL   ((10000000ULL + (TARGET_FPS / 2)) / (TARGET_FPS)) // 100ns units
-#define SECOND_FRAMES   TARGET_FPS
 
 // Timings expressed in milliseconds, then converted to frames for TARGET_FPS.
 #define MS_TO_FRAMES(ms)   ((UINTN)(((UINT64)(TARGET_FPS) * (UINT64)(ms) + 999ULL) / 1000ULL))
@@ -111,7 +113,8 @@ STATIC UINT32  mAnimIconSz[BOOT_COUNT];
 STATIC UINT8   mMenuAlpha      = 0;
 STATIC UINT32  mMenuFadeFrame   = 0;
 STATIC UINT32  mFrameNum        = 0;
-STATIC UINT32  mLastInputFrame  = 0;
+STATIC UINT64  mAnimElapsed100ns = 0;
+STATIC UINT64  mLastInput100ns   = 0;
 STATIC UINT8   mFooterAlpha     = 0;
 STATIC BOOLEAN mFooterShown     = FALSE;
 
@@ -6516,9 +6519,25 @@ STATIC EFI_GRAPHICS_OUTPUT_BLT_PIXEL UiSampleBilinearARGB16(
   return Out;
 }
 
+STATIC EFI_GRAPHICS_OUTPUT_BLT_PIXEL UiSampleNearestARGB16(
+  EFI_GRAPHICS_OUTPUT_BLT_PIXEL *Src,
+  UINT32 SrcW,
+  UINT32 SrcH,
+  UINT32 Sx16,
+  UINT32 Sy16
+)
+{
+  UINT32 x, y;
+  x = Sx16 >> 16;
+  y = Sy16 >> 16;
+  if (x >= SrcW) x = SrcW - 1;
+  if (y >= SrcH) y = SrcH - 1;
+  return Src[(UINTN)y * SrcW + x];
+}
+
 STATIC VOID DrawIconImage(UINTN Idx, INT32 Cx, INT32 Cy, INT32 Size)
 {
-  ICON_BMP *Ic = &mIconBmp[Idx];
+  LOADED_IMAGE *Ic = &mIcons[Idx];
   INT32 X0, Y0;
   INT32 x, y;
   UINT32 DstW, DstH;
@@ -6544,10 +6563,14 @@ STATIC VOID DrawIconImage(UINTN Idx, INT32 Cx, INT32 Cy, INT32 Size)
     for (x = 0; x < (INT32)DstW; x++) {
       UINT32 Sx16 = (UINT32)((UINT64)x * StepX16);
 
-      P = UiSampleBilinearARGB16(Ic->Data, Ic->W, Ic->H, Sx16, Sy16);
+      if ((UINT32)Size <= PIXELATE_ICON_SIZE) {
+        P = UiSampleNearestARGB16(Ic->Data, Ic->W, Ic->H, Sx16, Sy16);
+      } else {
+        P = UiSampleBilinearARGB16(Ic->Data, Ic->W, Ic->H, Sx16, Sy16);
+      }
 
       // chroma-key transparency (black background)
-      if (P.Red < IC_KEY_TH && P.Green < IC_KEY_TH && P.Blue < IC_KEY_TH) continue;
+      if (P.Red < ICON_KEY_THRESH && P.Green < ICON_KEY_THRESH && P.Blue < ICON_KEY_THRESH) continue;
 
       PutPx(X0 + x, Y0 + y, P);
     }
@@ -6627,7 +6650,7 @@ STATIC VOID DrawCubeProc(UINT32 CX, UINT32 CY, UINT32 Size)
 STATIC VOID DrawIcon(UINT32 CX, UINT32 CY, UINT32 Size, UINTN Idx)
 {
   if (mIcons[Idx].Data) {
-    DrawIconImage(CX, CY, Size, Idx);
+    DrawIconImage(Idx, (INT32)CX, (INT32)CY, (INT32)Size);
     return;
   }
   switch (Idx) {
@@ -6777,7 +6800,8 @@ STATIC VOID InitAnimState(UINTN InitialSel)
   mMenuAlpha = 0;
   mMenuFadeFrame = 0;
   mFrameNum = 0;
-  mLastInputFrame = 0;
+  mAnimElapsed100ns = 0;
+  mLastInput100ns = 0;
   mFooterAlpha = 0;
   mFooterShown = FALSE;
 }
@@ -6786,15 +6810,18 @@ STATIC VOID UpdateAnimations(UINTN Sel)
 {
   UINTN i;
   UINT32 target;
-  UINT32 elapsed;
+  UINT64 elapsed100ns;
+  UINT32 elapsedFrames;
 
   if (mMenuFadeFrame < MENU_FADE_FRAMES)
     mMenuFadeFrame++;
   mMenuAlpha = EaseAlphaFrame(mMenuFadeFrame, MENU_FADE_FRAMES);
 
-  elapsed = mFrameNum - mLastInputFrame;
-  if (mMenuAlpha == 255 && elapsed >= FOOTER_DELAY_F) {
-    UINT32 afterDelay = elapsed - FOOTER_DELAY_F;
+  elapsed100ns = (mAnimElapsed100ns >= mLastInput100ns) ? (mAnimElapsed100ns - mLastInput100ns) : 0;
+  elapsedFrames = (UINT32)(elapsed100ns / ANIM_INTERVAL);
+
+  if (mMenuAlpha == 255 && elapsedFrames >= FOOTER_DELAY_F) {
+    UINT32 afterDelay = elapsedFrames - FOOTER_DELAY_F;
     if (afterDelay < FOOTER_FADE_F) {
       mFooterAlpha = EaseAlphaFrame(afterDelay, FOOTER_FADE_F);
       mFooterShown = FALSE;
@@ -6811,7 +6838,7 @@ STATIC VOID UpdateAnimations(UINTN Sel)
         mFooterShown = FALSE;
       }
     }
-  } else if (elapsed < FOOTER_DELAY_F) {
+  } else if (elapsedFrames < FOOTER_DELAY_F) {
     mFooterAlpha = 0;
     mFooterShown = FALSE;
   }
@@ -6890,8 +6917,8 @@ STATIC CHAR16 *gBootLabel[BOOT_COUNT] = {
 STATIC VOID DrawMainMenuAnimated(UINTN Sel, UINTN Sec, BOOLEAN Cd)
 {
   EFI_GRAPHICS_OUTPUT_BLT_PIXEL White = MkPx(255, 255, 255);
-  EFI_GRAPHICS_OUTPUT_BLT_PIXEL Gray  = MkPx(200, 200, 200);
-  EFI_GRAPHICS_OUTPUT_BLT_PIXEL Dim   = MkPx(160, 160, 160);
+  EFI_GRAPHICS_OUTPUT_BLT_PIXEL Gray  = MkPx(222, 226, 232);
+  EFI_GRAPHICS_OUTPUT_BLT_PIXEL Dim   = MkPx(195, 201, 210);
   UINT32 TitleY, IconY, CX, TS, LS, SS, FS;
   UINTN  i;
   UINT32 Total = mStride * mScrH;
@@ -6906,7 +6933,7 @@ STATIC VOID DrawMainMenuAnimated(UINTN Sel, UINTN Sec, BOOLEAN Cd)
   FS = FooterScale();
 
   TitleY = mScrH * 18 / 100;
-  DrawStrFancyCenter(TitleY, L"Rain OS", White, TS);
+  DrawStrPlainCenter(TitleY, L"Rain OS", White, TS);
 
   IconY = mScrH * 54 / 100;
   CX    = mScrW / 2;
@@ -6923,7 +6950,7 @@ STATIC VOID DrawMainMenuAnimated(UINTN Sel, UINTN Sec, BOOLEAN Cd)
 
     LblY = IconY + IcSz / 2 + mScrH / 60;
     LblW = StrPxW(gBootLabel[i], LS);
-    DrawStrFancy(IcCX - LblW / 2, LblY, gBootLabel[i],
+    DrawStrPlain(IcCX - LblW / 2, LblY, gBootLabel[i],
                  (i == Sel) ? White : Gray, LS);
 
     if (i == Sel)
@@ -6941,7 +6968,7 @@ STATIC VOID DrawMainMenuAnimated(UINTN Sel, UINTN Sec, BOOLEAN Cd)
     UINT32 barFade = (mBarSlideFrame >= BAR_SLIDE_FRAMES)
                    ? 255U
                    : (UINT32)EaseAlphaFrame(mBarSlideFrame, BAR_SLIDE_FRAMES);
-    DrawLightBarAlpha((UINT32)BarX, BarY, LightBarWidth(), (UINT8)barFade);
+    DrawLightBarAlpha((UINT32)BarX, BarY, LightBarWidth(), (UINT8)(barFade * 3 / 4));
   }
 
   if (mMenuAlpha < 255) {
@@ -6962,7 +6989,7 @@ STATIC VOID DrawMainMenuAnimated(UINTN Sel, UINTN Sec, BOOLEAN Cd)
         CHAR16 Buf[80];
         UnicodeSPrint(Buf, sizeof(Buf),
                       L"Booting (%s) in %u seconds", gBootLabel[0], Sec);
-        DrawStrFancyCenter(mScrH * 86 / 100, Buf, Dim, SS);
+        DrawStrPlainCenter(mScrH * 86 / 100, Buf, Dim, SS);
       }
 
       {
@@ -6970,8 +6997,8 @@ STATIC VOID DrawMainMenuAnimated(UINTN Sel, UINTN Sec, BOOLEAN Cd)
         UINT32 FW1 = StrPxW(L"Boot (Enter)", FS);
         UINT32 FW2 = StrPxW(L"Settings (Space)", FS);
         UINT32 Margin = mScrW / 40;
-        DrawStrFancy(mScrW - FW1 - Margin, FY, L"Boot (Enter)", Dim, FS);
-        DrawStrFancy(mScrW - FW2 - Margin, FY + FS * 18,
+        DrawStrPlain(mScrW - FW1 - Margin, FY, L"Boot (Enter)", Dim, FS);
+        DrawStrPlain(mScrW - FW2 - Margin, FY + FS * 18,
                      L"Settings (Space)", Dim, FS);
       }
 
@@ -7054,66 +7081,6 @@ STATIC VOID DrawRoundedFrameAlpha(UINT32 X, UINT32 Y, UINT32 W, UINT32 H,
   }
 }
 
-STATIC VOID DrawSettingsPanelGlow(UINT32 X, UINT32 Y, UINT32 W, UINT32 H, UINT32 R)
-{
-  EFI_GRAPHICS_OUTPUT_BLT_PIXEL Blue  = MkPx(92, 176, 236);
-  EFI_GRAPHICS_OUTPUT_BLT_PIXEL Cyan  = MkPx(148, 214, 255);
-  EFI_GRAPHICS_OUTPUT_BLT_PIXEL White = MkPx(255,255,255);
-  UINTN i;
-
-  for (i = 0; i < 6; i++) {
-    UINT32 o = (UINT32)i + 1;
-    UINT8 a  = (UINT8)(16 - (INT32)i * 2);
-    INT32 x = (INT32)X - (INT32)o;
-    INT32 y = (INT32)Y - (INT32)o;
-    UINT32 w = W + o * 2;
-    UINT32 h = H + o * 2;
-    UINT32 rr = R + o;
-    if (a == 0) break;
-    if (x < 0 || y < 0) continue;
-    DrawRoundedFrameAlpha((UINT32)x, (UINT32)y, w, h, rr, Blue, a);
-    if ((i & 1U) == 0)
-      DrawRoundedFrameAlpha((UINT32)x, (UINT32)y, w, h, rr, Cyan, (UINT8)(a / 2));
-  }
-
-  DrawRoundedFrameAlpha(X,     Y,     W,     H,     R,     Cyan, 30);
-  DrawRoundedFrameAlpha(X + 1, Y + 1, W - 2, H - 2, (R > 0) ? R - 1 : 0, White, 18);
-  if (W > 4 && H > 4)
-    DrawRoundedFrameAlpha(X + 2, Y + 2, W - 4, H - 4, (R > 1) ? R - 2 : 0, White, 8);
-}
-
-STATIC VOID BlurRoundedRectInBackBuf(UINT32 X, UINT32 Y, UINT32 W, UINT32 H,
-                                     UINT32 R, UINT32 Radius, UINT32 Passes)
-{
-  EFI_GRAPHICS_OUTPUT_BLT_PIXEL *Orig;
-  UINT32 xx, yy;
-  if (!mBackBuf || W < 2 || H < 2) return;
-  if (X >= mScrW || Y >= mScrH) return;
-  if (X + W > mScrW) W = mScrW - X;
-  if (Y + H > mScrH) H = mScrH - Y;
-  if (W < 2 || H < 2) return;
-
-  Orig = AllocatePool((UINTN)W * H * sizeof(EFI_GRAPHICS_OUTPUT_BLT_PIXEL));
-  if (!Orig) return;
-
-  for (yy = 0; yy < H; yy++) {
-    CopyMem(&Orig[yy * W],
-            &mBackBuf[(Y + yy) * mStride + X],
-            (UINTN)W * sizeof(EFI_GRAPHICS_OUTPUT_BLT_PIXEL));
-  }
-
-  BlurRectInBackBuf(X, Y, W, H, Radius, Passes);
-
-  for (yy = 0; yy < H; yy++) {
-    for (xx = 0; xx < W; xx++) {
-      if (!PtInRoundedRectLocal(xx, yy, W, H, R))
-        mBackBuf[(Y + yy) * mStride + (X + xx)] = Orig[yy * W + xx];
-    }
-  }
-
-  FreePool(Orig);
-}
-
 STATIC VOID DrawImageMonoCentered(LOADED_IMAGE *Ic, UINT32 CX, UINT32 CY, UINT32 Size,
                                   EFI_GRAPHICS_OUTPUT_BLT_PIXEL Tint, UINT8 MasterA)
 {
@@ -7150,14 +7117,18 @@ STATIC VOID DrawImageMonoCentered(LOADED_IMAGE *Ic, UINT32 CX, UINT32 CY, UINT32
       p01 = Ic->Data[y1s * Ic->W + x0s];
       p11 = Ic->Data[y1s * Ic->W + x1s];
 
-      a00 = ((UINT32)p00.Red + p00.Green + p00.Blue) / 3U;
-      a10 = ((UINT32)p10.Red + p10.Green + p10.Blue) / 3U;
-      a01 = ((UINT32)p01.Red + p01.Green + p01.Blue) / 3U;
-      a11 = ((UINT32)p11.Red + p11.Green + p11.Blue) / 3U;
+      if (Size <= PIXELATE_ICON_SIZE) {
+        lum = ((UINT32)p00.Red + p00.Green + p00.Blue) / 3U;
+      } else {
+        a00 = ((UINT32)p00.Red + p00.Green + p00.Blue) / 3U;
+        a10 = ((UINT32)p10.Red + p10.Green + p10.Blue) / 3U;
+        a01 = ((UINT32)p01.Red + p01.Green + p01.Blue) / 3U;
+        a11 = ((UINT32)p11.Red + p11.Green + p11.Blue) / 3U;
 
-      top = ((a00 * (65535U - fx)) + (a10 * fx)) >> 16;
-      bot = ((a01 * (65535U - fx)) + (a11 * fx)) >> 16;
-      lum = ((top * (65535U - fy)) + (bot * fy)) >> 16;
+        top = ((a00 * (65535U - fx)) + (a10 * fx)) >> 16;
+        bot = ((a01 * (65535U - fx)) + (a11 * fx)) >> 16;
+        lum = ((top * (65535U - fy)) + (bot * fy)) >> 16;
+      }
 
       if (lum <= ICON_KEY_THRESH) continue;
       lum = (lum - ICON_KEY_THRESH) * 255U / (255U - ICON_KEY_THRESH);
@@ -7250,9 +7221,6 @@ STATIC VOID DrawUtilIcon(UINT32 CX, UINT32 CY, UINT32 Size, UINTN Idx, UINT8 A)
 /*  Utilities menu - dark blue frosted glass panel                     */
 /* ================================================================== */
 
-STATIC CONST CHAR16 *gUtilLabel[UTIL_COUNT] = {
-  L"Shut down", L"Restart", L"Windows Menu", L"Back"
-};
 STATIC CONST CHAR16 *gUtilIconPath[UTIL_COUNT] = {
   L"\\EFI\\BOOT\\st_power.bmp",
   L"\\EFI\\BOOT\\st_restart.bmp",
@@ -7268,13 +7236,13 @@ CONST UINTN  IconIdx[] = { 0, 1, 2 }; // mUtilIcons: power, restart, windows
 UINTN Cnt = 3;
 UINT32 PanelW, PanelH, X0, Y0;
 UINT32 HeaderY, LineY, CardW, CardH, GapY, CardsTop;
-UINT32 IconScale, TextScale;
+UINT32 TextScale;
 UINT32 S, Radius, CardR;
 UINT32 i;
 
-EFI_GRAPHICS_OUTPUT_BLT_PIXEL White = MkPx(245,247,250);
-EFI_GRAPHICS_OUTPUT_BLT_PIXEL TextN = MkPx(229,233,238);
-EFI_GRAPHICS_OUTPUT_BLT_PIXEL Dim   = MkPx(200,206,214);
+EFI_GRAPHICS_OUTPUT_BLT_PIXEL White = MkPx(248,250,252);
+EFI_GRAPHICS_OUTPUT_BLT_PIXEL TextN = MkPx(225,230,236);
+EFI_GRAPHICS_OUTPUT_BLT_PIXEL Dim   = MkPx(190,198,208);
 
 DrawBackground();
 
@@ -7313,23 +7281,23 @@ if (mUtilPanelBlurValid && mUtilPanelBlur) {
 }
 
 // Frosted panel tint + subtle inner haze
-BlendRoundedRectAlpha((INT32)X0, (INT32)Y0, (INT32)PanelW, (INT32)PanelH, (INT32)Radius, MkPx(62,72,80), 88);
+BlendRoundedRectAlpha((INT32)X0, (INT32)Y0, (INT32)PanelW, (INT32)PanelH, (INT32)Radius, MkPx(54,63,74), 84);
 if (PanelW > 2 && PanelH > 2 && Radius > 1) {
-  BlendRoundedRectAlpha((INT32)X0 + 1, (INT32)Y0 + 1, (INT32)PanelW - 2, (INT32)PanelH - 2, (INT32)Radius - 1, MkPx(255,255,255), 8);
+  BlendRoundedRectAlpha((INT32)X0 + 1, (INT32)Y0 + 1, (INT32)PanelW - 2, (INT32)PanelH - 2, (INT32)Radius - 1, MkPx(255,255,255), 10);
 }
 
-// Subtle blue edge + outer glow (kept light for speed)
-DrawRoundedFrameAlpha((INT32)X0, (INT32)Y0, (INT32)PanelW, (INT32)PanelH, (INT32)Radius, MkPx(150,190,225), 26);
+// clean neutral edge + minimal glow
+DrawRoundedFrameAlpha((INT32)X0, (INT32)Y0, (INT32)PanelW, (INT32)PanelH, (INT32)Radius, MkPx(210,220,235), 20);
 for (i = 0; i < 3; i++) {
   UINT8 a = (UINT8)(14 - i * 4);
   if (a == 0) break;
   DrawRoundedFrameAlpha((INT32)X0 - (INT32)i, (INT32)Y0 - (INT32)i,
                         (INT32)PanelW + (INT32)i * 2, (INT32)PanelH + (INT32)i * 2,
-                        (INT32)Radius + (INT32)i, MkPx(120,170,235), a);
+                        (INT32)Radius + (INT32)i, MkPx(185,200,220), (UINT8)(a / 2));
 }
 
 HeaderY = Y0 + 16 * S;
-DrawStrFancyCenter((INT32)HeaderY, L"Settings", White, StatusScale() + 1);
+DrawStrPlainCenter((INT32)HeaderY, L"Settings", White, StatusScale() + 1);
 
 LineY = HeaderY + UiFontLinePx(StatusScale() + 1) + 10 * S;
 if (PanelW > 36 * S) {
@@ -7346,8 +7314,6 @@ CardsTop = LineY + 16 * S;
 CardR = 14 * S;
 if (CardR < 10) CardR = 10;
 
-IconScale = LabelScale();
-if (IconScale < 2) IconScale = 2;
 TextScale = FooterScale() + 1;
 
 for (i = 0; i < (UINT32)Cnt; i++) {
@@ -7366,23 +7332,24 @@ for (i = 0; i < (UINT32)Cnt; i++) {
 
   if (i == (UINT32)Sel) {
     DrawRoundedFrameAlpha((INT32)(X0 + 12 * S), (INT32)Cy, (INT32)CardW, (INT32)CardH, (INT32)CardR,
-                          MkPx(170,205,240), 60);
-    DrawLightBarAlpha(mScrW / 2, Cy + CardH - 3 * S, CardW - 24 * S, 170);
+                          MkPx(208,220,235), 44);
+    DrawLightBarAlpha(mScrW / 2, Cy + CardH - 3 * S, CardW - 24 * S, 108);
   }
 
   // Icon (BMP) + label
   if (mUtilIcons[IconIdx[i]].Data != NULL) {
-    DrawUtilIcon(IconIdx[i], (INT32)IconX, (INT32)IconY, (INT32)IconSz);
+    DrawUtilIcon(IconX, IconY, IconSz, IconIdx[i], 255);
   }
-  DrawStrFancy(TextX, (INT32)TxtY, Items[i], (i == (UINT32)Sel) ? White : TextN, TextScale);
+  DrawStrPlain(TextX, (INT32)TxtY, Items[i], (i == (UINT32)Sel) ? White : TextN, TextScale);
 }
 
 // Back icon (BMP) bottom-left of the panel
 if (mUtilIcons[3].Data != NULL) {
-  DrawUtilIcon(3,
-               (INT32)(X0 + 22 * S),
-               (INT32)(Y0 + PanelH - 22 * S),
-               (INT32)(18 * S));
+  DrawUtilIcon((UINT32)(X0 + 22 * S),
+               (UINT32)(Y0 + PanelH - 22 * S),
+               (UINT32)(18 * S),
+               3,
+               255);
 } else {
   DrawStrFancy((INT32)(X0 + 16 * S),
                (INT32)(Y0 + PanelH - UiFontLinePx(FooterScale() + 1) - 14 * S),
@@ -7520,9 +7487,6 @@ STATIC UINT32 MainIconSize(VOID)
   return IconNormal();
 }
 
-
-STATIC UINT8 mUtilAlpha = 255;
-
 STATIC UINT32 BigIcon(VOID)
 {
   UINT32 v = MainIconSize();
@@ -7534,19 +7498,6 @@ STATIC UINT32 SmallIcon(VOID)
 {
   UINT32 v = BigIcon();
   return (v > 16) ? (v * 78 / 100) : v;
-}
-
-STATIC UINT32 LerpStepU32(UINT32 Cur, UINT32 Dst, UINT32 Step)
-{
-  if (Cur < Dst) {
-    UINT32 d = Dst - Cur;
-    return (d > Step) ? (Cur + Step) : Dst;
-  }
-  if (Cur > Dst) {
-    UINT32 d = Cur - Dst;
-    return (d > Step) ? (Cur - Step) : Dst;
-  }
-  return Cur;
 }
 
 
@@ -7568,13 +7519,19 @@ STATIC EFI_STATUS InitGfx(IN EFI_HANDLE ImageHandle)
     return EFI_UNSUPPORTED;
   }
 
-  // Choose the largest available GOP mode for crisp output (reduces host-side scaling blur).
+  // Prefer 2560x1600 when available (target panel), else use the largest available mode.
   BestMode = mGop->Mode->Mode;
   BestArea = 0;
   for (i = 0; i < mGop->Mode->MaxMode; i++) {
     EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *Info = NULL;
     UINTN InfoSz = 0;
     if (!EFI_ERROR(mGop->QueryMode(mGop, i, &InfoSz, &Info)) && Info) {
+      if (Info->HorizontalResolution == PREF_GOP_W && Info->VerticalResolution == PREF_GOP_H) {
+        BestMode = i;
+        FreePool(Info);
+        break;
+      }
+
       UINT64 Area = (UINT64)Info->HorizontalResolution * (UINT64)Info->VerticalResolution;
       if (Area > BestArea) {
         BestArea = Area;
@@ -7664,10 +7621,13 @@ EFI_STATUS EFIAPI UefiMain(IN EFI_HANDLE ImageHandle,
 
     if (Timer && Idx == 1) {
       mFrameNum++;
+      mAnimElapsed100ns += ANIM_INTERVAL;
 
       if (Mode == MODE_MAIN) {
-        if (CdActive && (mFrameNum % SECOND_FRAMES == 0)) {
-          if (SecsLeft > 0) SecsLeft--;
+        if (CdActive) {
+          UINTN secondsPassed = (UINTN)(mAnimElapsed100ns / 10000000ULL);
+          UINTN remaining = (secondsPassed >= TIMEOUT_SECONDS) ? 0 : (TIMEOUT_SECONDS - secondsPassed);
+          SecsLeft = remaining;
         }
 
         UpdateAnimations(MainSel);
@@ -7687,7 +7647,7 @@ EFI_STATUS EFIAPI UefiMain(IN EFI_HANDLE ImageHandle,
     St = gST->ConIn->ReadKeyStroke(gST->ConIn, &Key);
     if (EFI_ERROR(St)) continue;
 
-    mLastInputFrame = mFrameNum;
+    mLastInput100ns = mAnimElapsed100ns;
     mFooterShown = FALSE;
     mFooterAlpha = 0;
 
@@ -7732,7 +7692,7 @@ EFI_STATUS EFIAPI UefiMain(IN EFI_HANDLE ImageHandle,
       mBarStartX = GetItemCenterX(MainSel);
       mBarEndX = mBarStartX;
       mBarSlideFrame = 0;
-      mLastInputFrame = mFrameNum;
+      mLastInput100ns = mAnimElapsed100ns;
       mFooterShown = FALSE;
       mFooterAlpha = 0;
       if (GfxOk) DrawMainMenuAnimated(MainSel, SecsLeft, CdActive);
@@ -7755,7 +7715,7 @@ EFI_STATUS EFIAPI UefiMain(IN EFI_HANDLE ImageHandle,
       mBarStartX = GetItemCenterX(MainSel);
       mBarEndX = mBarStartX;
       mBarSlideFrame = 0;
-      mLastInputFrame = mFrameNum;
+      mLastInput100ns = mAnimElapsed100ns;
       mFooterShown = FALSE;
       mFooterAlpha = 0;
       if (GfxOk) DrawMainMenuAnimated(MainSel, SecsLeft, CdActive);
