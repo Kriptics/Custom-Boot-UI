@@ -1,0 +1,23 @@
+cd /d "C:\UEFI\edk2"
+
+call "edksetup.bat" Rebuild
+
+build -a X64 -t VS2022 -b RELEASE -p "MdeModulePkg\MdeModulePkg.dsc" -m "BootUI\BootUI.inf" -c > "C:\UEFI\edk2\build_bootui.log" 2>&1
+
+if errorlevel 1 (
+
+echo BUILD FAILED. Log: C:\UEFI\edk2\build_bootui.log
+
+powershell -NoProfile -Command "Get-Content -LiteralPath 'C:\UEFI\edk2\build_bootui.log' -Tail 120"
+
+pause
+
+exit /b 1
+
+)
+
+copy /y "C:\UEFI\edk2\Build\MdeModule\RELEASE_VS2022\X64\BootUI\BootUI\OUTPUT\BootUI.efi" "F:\EFI\BOOT\BOOTX64.EFI"
+
+echo BUILD OK + COPIED TO F:\EFI\BOOT\BOOTX64.EFI
+
+pause

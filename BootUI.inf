@@ -1,0 +1,36 @@
+[Defines]
+  INF_VERSION                    = 0x0001001A
+  BASE_NAME                      = BootUI
+  FILE_GUID                      = 2D4B9AC2-2F4B-4B73-8B9F-1C9B8B3B0A11
+  MODULE_TYPE                    = UEFI_APPLICATION
+  VERSION_STRING                 = 1.0
+  ENTRY_POINT                    = UefiMain
+
+[Sources]
+  BootUI.c
+
+# Optional runtime Settings menu icons (loaded from EFI at runtime, not build inputs):
+#   \EFI\BOOT\st_power.bmp
+#   \EFI\BOOT\st_restart.bmp
+#   \EFI\BOOT\st_windows.bmp
+#   \EFI\BOOT\st_back.bmp
+
+[Packages]
+  MdePkg/MdePkg.dec
+  MdeModulePkg/MdeModulePkg.dec
+
+[LibraryClasses]
+  UefiApplicationEntryPoint
+  UefiLib
+  BaseLib
+  BaseMemoryLib
+  MemoryAllocationLib
+  PrintLib
+  UefiBootServicesTableLib
+  UefiRuntimeServicesTableLib
+  DevicePathLib
+
+[Protocols]
+  gEfiLoadedImageProtocolGuid
+  gEfiGraphicsOutputProtocolGuid
+  gEfiSimpleFileSystemProtocolGuid
