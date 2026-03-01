@@ -150,7 +150,7 @@ typedef struct {
 #define AA_FONT_COUNT  95
 #define AA_FONT_LINEH  72
 #define AA_FONT_ASCENT 58
-#define AA_FONT_EM16   18   /* target pixels for S=1; tuned for UI readability */
+#define AA_FONT_EM16   22   /* target pixels for S=1; tuned for sharper small UI text */
 
 STATIC CONST AA_GLYPH gAaGlyph[95] = {
   { 0, 0, 0, 0, 16, 0 }, /* 32 'space' */
@@ -5773,14 +5773,14 @@ STATIC UINT8 UiFontAlphaCurve(UINT8 A, UINT32 DstLineH)
 
   if (A == 0) return 0;
 
-  floorA = (DstLineH <= 18) ? 8U : ((DstLineH <= 24) ? 6U : 4U);
+  floorA = (DstLineH <= 20) ? 4U : ((DstLineH <= 28) ? 3U : 2U);
   if ((UINT32)A <= floorA) return 0;
 
   v = (UINT32)A - floorA;
   v = v * 255U / (255U - floorA);
 
-  if (DstLineH <= 22) {
-    v = (v * (170U + v)) / 255U; /* gentle stem boost on small UI text */
+  if (DstLineH <= 24) {
+    v = (v * (150U + v)) / 255U; /* keep edges smooth for small UI text */
   } else {
     boost = 8U + (DstLineH > 44 ? 8U : (DstLineH - 12U) / 4U);
     if (v > 255U - boost) v = 255U;
@@ -6720,10 +6720,10 @@ STATIC VOID Flush(VOID)
 /*  Layout helpers                                                     */
 /* ================================================================== */
 
-STATIC UINT32 TitleScale(VOID)    { UINT32 s = mScrH / 400; return (s < 2) ? 2 : s; }
-STATIC UINT32 LabelScale(VOID)    { UINT32 s = mScrH / 1280; return (s < 1) ? 1 : s; }
-STATIC UINT32 StatusScale(VOID)   { UINT32 s = mScrH / 1600; return (s < 1) ? 1 : s; }
-STATIC UINT32 FooterScale(VOID)   { UINT32 s = mScrH / 1600; return (s < 1) ? 1 : s; }
+STATIC UINT32 TitleScale(VOID)    { UINT32 s = mScrH / 420;  return (s < 2) ? 2 : s; }
+STATIC UINT32 LabelScale(VOID)    { UINT32 s = mScrH / 1100; return (s < 1) ? 1 : s; }
+STATIC UINT32 StatusScale(VOID)   { UINT32 s = mScrH / 1350; return (s < 1) ? 1 : s; }
+STATIC UINT32 FooterScale(VOID)   { UINT32 s = mScrH / 1350; return (s < 1) ? 1 : s; }
 STATIC UINT32 IconNormal(VOID)    { return mScrH / 22; }
 STATIC UINT32 IconHover(VOID)     { return mScrH / 20; }
 STATIC UINT32 IconSpacing(VOID)   { return mScrW / 7; }
