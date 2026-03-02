@@ -46,7 +46,7 @@
 // NOTE: UEFI GOP does not expose a reliable refresh-rate/HZ control, so we target a
 // very high internal update cadence and render as fast as firmware allows.
 // If the platform can't keep up, the UI still works and naturally runs at the max it can sustain.
-#define TARGET_FPS      360
+#define TARGET_FPS      144
 #define ANIM_INTERVAL   ((10000000ULL + (TARGET_FPS / 2)) / (TARGET_FPS)) // 100ns units
 
 // Timings expressed in milliseconds, then converted to frames for TARGET_FPS.
@@ -6718,7 +6718,7 @@ STATIC VOID Flush(VOID)
 /*  Layout helpers                                                     */
 /* ================================================================== */
 
-STATIC UINT32 TitleScale(VOID)    { UINT32 s = mScrH / 250;  return (s < 4) ? 4 : s; }
+STATIC UINT32 TitleScale(VOID)    { UINT32 s = mScrH / 320;  return (s < 3) ? 3 : s; }
 STATIC UINT32 LabelScale(VOID)    { UINT32 s = mScrH / 1200; return (s < 1) ? 1 : s; }
 STATIC UINT32 StatusScale(VOID)   { UINT32 s = mScrH / 1350; return (s < 1) ? 1 : s; }
 STATIC UINT32 FooterScale(VOID)   { UINT32 s = mScrH / 1350; return (s < 1) ? 1 : s; }
@@ -6922,12 +6922,12 @@ STATIC VOID DrawMainMenuAnimated(UINTN Sel, UINTN Sec, BOOLEAN Cd)
 
   DrawBackground();
 
-  TS = TitleScale() + 1;
+  TS = TitleScale();
   LS = LabelScale();
   SS = StatusScale();
 
   TitleY = mScrH * 18 / 100;
-  DrawStrFancyCenter(TitleY, L"Rain OS", White, TS + 1);
+  DrawStrFancyCenter(TitleY, L"Rain OS", White, TS);
 
   IconY = mScrH * 54 / 100;
   CX    = mScrW / 2;
@@ -6939,13 +6939,16 @@ STATIC VOID DrawMainMenuAnimated(UINTN Sel, UINTN Sec, BOOLEAN Cd)
     UINT32 IcCX = (UINT32)((INT32)CX + Off);
     UINT32 IcSz = mAnimIconSz[i];
     UINT32 LblY, LblW;
+    UINT32 ItemScale;
 
     DrawIcon(IcCX, IconY, IcSz, i);
 
+    ItemScale = LS;
+    if (i == 2 && ItemScale > 1) ItemScale--; // keep "256GB NVMe" visually balanced
     LblY = IconY + IcSz / 2 + mScrH / 60;
-    LblW = StrPxW(gBootLabel[i], LS);
-    DrawStrPlain(IcCX - LblW / 2, LblY, gBootLabel[i],
-                 (i == Sel) ? White : Gray, LS);
+    LblW = StrPxW(gBootLabel[i], ItemScale);
+    DrawStrFancy(IcCX - LblW / 2, LblY, gBootLabel[i],
+                 (i == Sel) ? White : Gray, ItemScale);
 
     if (i == Sel)
       BarY = LblY + LS * 16 + mScrH / 120;
@@ -7208,9 +7211,9 @@ DrawBackground();
 S = (UINT32)StatusScale();
 if (S < 1) S = 1;
 
-PanelW = mScrW / 6;
+PanelW = mScrW / 5;
 if (PanelW < 260) PanelW = 260;
-if (PanelW > 360) PanelW = 360;
+if (PanelW > 420) PanelW = 420;
 
 PanelH = mScrH * 52 / 100;
 if (PanelH < 360) PanelH = 360;
@@ -7255,29 +7258,28 @@ for (i = 0; i < 3; i++) {
 }
 
 HeaderY = Y0 + 16 * S;
-DrawStrPlainCenter((INT32)HeaderY, L"Settings", White, StatusScale() + 2);
+DrawStrPlainCenter((INT32)HeaderY, L"Settings", White, StatusScale() + 1);
 
-LineY = HeaderY + UiFontLinePx(StatusScale() + 2) + 10 * S;
+LineY = HeaderY + UiFontLinePx(StatusScale() + 1) + 10 * S;
 {
-  UINT32 UnderW = StrPxW(L"Settings", StatusScale() + 2);
-  UnderW = UnderW * 90 / 100;
+  UINT32 UnderW = PanelW - (24 * S);
   if (UnderW < 88 * S) UnderW = 88 * S;
-  if (UnderW > PanelW - 48 * S) UnderW = PanelW - 48 * S;
   FillRectAlpha(X0 + (PanelW - UnderW) / 2, LineY, UnderW, 2, MkPx(255,255,255), 28);
 }
 
 CardW = PanelW - 34 * S;
 if ((INT32)CardW < 140) CardW = 140;
-CardH = (PanelH - (LineY - Y0) - (92 * S)) / 3;
+CardH = (PanelH - (LineY - Y0) - (102 * S)) / 3;
 if (CardH < 72 * S) CardH = 72 * S;
-GapY = 10 * S;
-CardsTop = LineY + 16 * S;
+GapY = (PanelH - (LineY - Y0) - (24 * S) - (CardH * 3)) / 4;
+if (GapY < 8 * S) GapY = 8 * S;
+CardsTop = LineY + GapY;
 
 TextScale = FooterScale();
 if (TextScale < 1) TextScale = 1;
 
 for (i = 0; i < (UINT32)Cnt; i++) {
-  UINT32 Cy = CardsTop + i * (CardH + GapY);
+  UINT32 Cy = CardsTop + GapY + i * (CardH + GapY);
   UINT32 IconSz = ((i == (UINT32)Sel) ? 27U : 24U) * S;
   UINT32 IconX  = X0 + PanelW / 2;
   UINT32 IconY  = Cy + (CardH * 40 / 100);
@@ -7530,6 +7532,7 @@ EFI_STATUS EFIAPI UefiMain(IN EFI_HANDLE ImageHandle,
   BOOLEAN    GfxOk;
   UI_MODE    Mode;
   UINTN      MainSel, UtilSel, SecsLeft;
+  UINT64     TimerAccum100ns;
   BOOLEAN    CdActive;
   EFI_EVENT  Timer;
 
@@ -7546,6 +7549,7 @@ EFI_STATUS EFIAPI UefiMain(IN EFI_HANDLE ImageHandle,
   MainSel  = 0;
   UtilSel  = 0;
   SecsLeft = TIMEOUT_SECONDS;
+  TimerAccum100ns = 0;
   CdActive = TRUE;
   Timer    = NULL;
 
@@ -7576,16 +7580,15 @@ EFI_STATUS EFIAPI UefiMain(IN EFI_HANDLE ImageHandle,
 
     if (Timer && Idx == 1) {
       mFrameNum++;
-      {
-        UINT64 delta100ns = PerfDelta100ns();
-        mAnimElapsed100ns += delta100ns;
-      }
+      mAnimElapsed100ns += ANIM_INTERVAL;
+      TimerAccum100ns += ANIM_INTERVAL;
 
       if (Mode == MODE_MAIN) {
         if (CdActive) {
-          UINT64 timeout100ns = (UINT64)TIMEOUT_SECONDS * 10000000ULL;
-          UINT64 remaining100ns = (mAnimElapsed100ns >= timeout100ns) ? 0 : (timeout100ns - mAnimElapsed100ns);
-          SecsLeft = (UINTN)((remaining100ns + 10000000ULL - 1ULL) / 10000000ULL);
+          while (TimerAccum100ns >= 10000000ULL && SecsLeft > 0) {
+            TimerAccum100ns -= 10000000ULL;
+            SecsLeft--;
+          }
         }
 
         UpdateAnimations(MainSel);
@@ -7616,6 +7619,7 @@ EFI_STATUS EFIAPI UefiMain(IN EFI_HANDLE ImageHandle,
 
     if (Mode == MODE_MAIN && CdActive) {
       CdActive = FALSE;
+      TimerAccum100ns = 0;
     }
 
     if (Mode == MODE_MAIN) {
