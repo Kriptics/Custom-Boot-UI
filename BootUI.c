@@ -39,13 +39,12 @@
 #define ICON_KEY_THRESH    30
 #define PREF_GOP_W      2560
 #define PREF_GOP_H      1600
-#define PIXELATE_ICON_SIZE    44
 
 // Animation tick
-// NOTE: UEFI GOP does not expose a reliable refresh-rate control, so we target a
-// higher internal update rate to make fades and transitions feel smooth on high-Hz panels.
-// If the platform can't keep up, the UI still works; it just updates less often.
-#define TARGET_FPS      240
+// NOTE: UEFI GOP does not expose a reliable refresh-rate/HZ control, so we target a
+// very high internal update cadence and render as fast as firmware allows.
+// If the platform can't keep up, the UI still works and naturally runs at the max it can sustain.
+#define TARGET_FPS      480
 #define ANIM_INTERVAL   ((10000000ULL + (TARGET_FPS / 2)) / (TARGET_FPS)) // 100ns units
 
 // Timings expressed in milliseconds, then converted to frames for TARGET_FPS.
@@ -60,9 +59,9 @@
 // Light-bar slide
 #define BAR_SLIDE_FRAMES  MS_TO_FRAMES(140)
 
-// Icon size lerp divisor (higher = slower approach). Scale with FPS.
-#define FPS_SCALE        ((TARGET_FPS + 59) / 60)
-#define ICON_LERP_DENOM  (4 * FPS_SCALE)
+// Icon size lerp divisor (higher = slower approach).
+// Keep this fixed so increasing timer cadence does not make selection animations feel sluggish.
+#define ICON_LERP_DENOM  5
 
 /* Boot transition: fade-out 1.5 s, text fade-in 1 s */
 #define BOOT_FADE_STEPS   18
@@ -6521,22 +6520,6 @@ STATIC EFI_GRAPHICS_OUTPUT_BLT_PIXEL UiSampleBilinearARGB16(
   return Out;
 }
 
-STATIC EFI_GRAPHICS_OUTPUT_BLT_PIXEL UiSampleNearestARGB16(
-  EFI_GRAPHICS_OUTPUT_BLT_PIXEL *Src,
-  UINT32 SrcW,
-  UINT32 SrcH,
-  UINT32 Sx16,
-  UINT32 Sy16
-)
-{
-  UINT32 x, y;
-  x = Sx16 >> 16;
-  y = Sy16 >> 16;
-  if (x >= SrcW) x = SrcW - 1;
-  if (y >= SrcH) y = SrcH - 1;
-  return Src[(UINTN)y * SrcW + x];
-}
-
 STATIC VOID DrawIconImage(UINTN Idx, INT32 Cx, INT32 Cy, INT32 Size)
 {
   LOADED_IMAGE *Ic = &mIcons[Idx];
@@ -6565,11 +6548,7 @@ STATIC VOID DrawIconImage(UINTN Idx, INT32 Cx, INT32 Cy, INT32 Size)
     for (x = 0; x < (INT32)DstW; x++) {
       UINT32 Sx16 = (UINT32)((UINT64)x * StepX16);
 
-      if ((UINT32)Size <= PIXELATE_ICON_SIZE) {
-        P = UiSampleNearestARGB16(Ic->Data, Ic->W, Ic->H, Sx16, Sy16);
-      } else {
-        P = UiSampleBilinearARGB16(Ic->Data, Ic->W, Ic->H, Sx16, Sy16);
-      }
+      P = UiSampleBilinearARGB16(Ic->Data, Ic->W, Ic->H, Sx16, Sy16);
 
       // chroma-key transparency (black background)
       if (P.Red < ICON_KEY_THRESH && P.Green < ICON_KEY_THRESH && P.Blue < ICON_KEY_THRESH) continue;
@@ -6722,7 +6701,7 @@ STATIC VOID Flush(VOID)
 /*  Layout helpers                                                     */
 /* ================================================================== */
 
-STATIC UINT32 TitleScale(VOID)    { UINT32 s = mScrH / 420;  return (s < 2) ? 2 : s; }
+STATIC UINT32 TitleScale(VOID)    { UINT32 s = mScrH / 300;  return (s < 3) ? 3 : s; }
 STATIC UINT32 LabelScale(VOID)    { UINT32 s = mScrH / 1100; return (s < 1) ? 1 : s; }
 STATIC UINT32 StatusScale(VOID)   { UINT32 s = mScrH / 1350; return (s < 1) ? 1 : s; }
 STATIC UINT32 FooterScale(VOID)   { UINT32 s = mScrH / 1350; return (s < 1) ? 1 : s; }
@@ -6928,7 +6907,7 @@ STATIC VOID DrawMainMenuAnimated(UINTN Sel, UINTN Sec, BOOLEAN Cd)
   SS = StatusScale();
 
   TitleY = mScrH * 18 / 100;
-  DrawStrPlainCenter(TitleY, L"Rain OS", White, TS);
+  DrawStrFancyCenter(TitleY, L"Rain OS", White, TS);
 
   {
     CHAR16 FpsBuf[32];
@@ -7108,18 +7087,14 @@ STATIC VOID DrawImageMonoCentered(LOADED_IMAGE *Ic, UINT32 CX, UINT32 CY, UINT32
       p01 = Ic->Data[y1s * Ic->W + x0s];
       p11 = Ic->Data[y1s * Ic->W + x1s];
 
-      if (Size <= PIXELATE_ICON_SIZE) {
-        lum = ((UINT32)p00.Red + p00.Green + p00.Blue) / 3U;
-      } else {
-        a00 = ((UINT32)p00.Red + p00.Green + p00.Blue) / 3U;
-        a10 = ((UINT32)p10.Red + p10.Green + p10.Blue) / 3U;
-        a01 = ((UINT32)p01.Red + p01.Green + p01.Blue) / 3U;
-        a11 = ((UINT32)p11.Red + p11.Green + p11.Blue) / 3U;
+      a00 = ((UINT32)p00.Red + p00.Green + p00.Blue) / 3U;
+      a10 = ((UINT32)p10.Red + p10.Green + p10.Blue) / 3U;
+      a01 = ((UINT32)p01.Red + p01.Green + p01.Blue) / 3U;
+      a11 = ((UINT32)p11.Red + p11.Green + p11.Blue) / 3U;
 
-        top = ((a00 * (65535U - fx)) + (a10 * fx)) >> 16;
-        bot = ((a01 * (65535U - fx)) + (a11 * fx)) >> 16;
-        lum = ((top * (65535U - fy)) + (bot * fy)) >> 16;
-      }
+      top = ((a00 * (65535U - fx)) + (a10 * fx)) >> 16;
+      bot = ((a01 * (65535U - fx)) + (a11 * fx)) >> 16;
+      lum = ((top * (65535U - fy)) + (bot * fy)) >> 16;
 
       if (lum <= ICON_KEY_THRESH) continue;
       lum = (lum - ICON_KEY_THRESH) * 255U / (255U - ICON_KEY_THRESH);
@@ -7318,12 +7293,12 @@ for (i = 0; i < (UINT32)Cnt; i++) {
   UINT32 Tw   = StrPxW(Items[i], TextScale);
   INT32  TextX = (INT32)(X0 + (PanelW - Tw) / 2);
 
-  // Minimal row fill; no per-card border outlines.
+  // Borderless rows: keep them pressable but remove outlined-card appearance.
   BlendRoundedRectAlpha((INT32)(X0 + 12 * S), (INT32)Cy, (INT32)CardW, (INT32)CardH, (INT32)CardR,
-                        MkPx(255,255,255), (i == (UINT32)Sel) ? 10 : 4);
+                        MkPx(255,255,255), (i == (UINT32)Sel) ? 5 : 0);
 
   if (i == (UINT32)Sel) {
-    DrawLightBarAlpha(mScrW / 2, Cy + CardH - 3 * S, CardW - 24 * S, 96);
+    DrawLightBarAlpha(mScrW / 2, Cy + CardH - 2 * S, CardW - 28 * S, 54);
   }
 
   // Icon above label, centered.
