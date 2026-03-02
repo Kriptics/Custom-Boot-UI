@@ -6933,7 +6933,9 @@ STATIC VOID DrawMainMenuAnimated(UINTN Sel, UINTN Sec, BOOLEAN Cd)
   {
     CHAR16 FpsBuf[32];
     UnicodeSPrint(FpsBuf, sizeof(FpsBuf), L"FPS %u", mFpsDisplay);
-    DrawStrPlain((INT32)(18 * UiScale()), (INT32)(16 * UiScale()), FpsBuf, Dim, LabelScale());
+ codex/plan-and-implement-bootui-changes
+    DrawStrPlain((INT32)(18 * LabelScale()), (INT32)(16 * LabelScale()), FpsBuf, Dim, LabelScale());
+ main
   }
 
   IconY = mScrH * 54 / 100;
