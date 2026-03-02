@@ -13,6 +13,7 @@
 #include <Library/MemoryAllocationLib.h>
 #include <Library/BaseMemoryLib.h>
 #include <Library/PrintLib.h>
+#include <Library/TimerLib.h>
 #include <Protocol/LoadedImage.h>
 #include <Protocol/GraphicsOutput.h>
 #include <Protocol/SimpleFileSystem.h>
