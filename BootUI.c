@@ -1,7 +1,7 @@
 /*
  * Rain OS v6 - Graphical UEFI Boot Manager
  * Target: Razer Blade 16 2025 (2560x1600 OLED)
- * Bilinear-smoothed font, 60fps animations, modern utility panel
+ * Bilinear-smoothed font, high-FPS animations, modern utility panel
  */
 
 #include <Uefi.h>
@@ -51,12 +51,11 @@
 // Timings expressed in milliseconds, then converted to frames for TARGET_FPS.
 #define MS_TO_FRAMES(ms)   ((UINTN)(((UINT64)(TARGET_FPS) * (UINT64)(ms) + 999ULL) / 1000ULL))
 
-// Main menu fade timings (faster than the original 60 FPS tuning)
-#define MENU_FADE_FRAMES  MS_TO_FRAMES(220)
-// Footer: show sooner and animate faster
-#define FOOTER_DELAY_F    MS_TO_FRAMES(500)
-#define FOOTER_FADE_F     MS_TO_FRAMES(200)
-#define FOOTER_SHOW_F     MS_TO_FRAMES(2500)
+// Main menu fade timings tuned for smoother perceptual motion.
+#define MENU_FADE_FRAMES  MS_TO_FRAMES(320)
+// Footer: appears after a short delay and then remains visible until user input.
+#define FOOTER_DELAY_F    MS_TO_FRAMES(420)
+#define FOOTER_FADE_F     MS_TO_FRAMES(320)
 
 // Light-bar slide
 #define BAR_SLIDE_FRAMES  MS_TO_FRAMES(140)
@@ -117,6 +116,9 @@ STATIC UINT64  mAnimElapsed100ns = 0;
 STATIC UINT64  mLastInput100ns   = 0;
 STATIC UINT8   mFooterAlpha     = 0;
 STATIC BOOLEAN mFooterShown     = FALSE;
+STATIC UINT32  mFpsCounter      = 0;
+STATIC UINT64  mFpsAccum100ns   = 0;
+STATIC UINT32  mFpsDisplay      = 0;
 
 
 /* Forward declarations for helpers referenced before their definitions */
@@ -6804,6 +6806,9 @@ STATIC VOID InitAnimState(UINTN InitialSel)
   mLastInput100ns = 0;
   mFooterAlpha = 0;
   mFooterShown = FALSE;
+  mFpsCounter = 0;
+  mFpsAccum100ns = 0;
+  mFpsDisplay = 0;
 }
 
 STATIC VOID UpdateAnimations(UINTN Sel)
@@ -6825,18 +6830,9 @@ STATIC VOID UpdateAnimations(UINTN Sel)
     if (afterDelay < FOOTER_FADE_F) {
       mFooterAlpha = EaseAlphaFrame(afterDelay, FOOTER_FADE_F);
       mFooterShown = FALSE;
-    } else if (afterDelay < FOOTER_FADE_F + FOOTER_SHOW_F) {
+    } else {
       mFooterAlpha = 255;
       mFooterShown = TRUE;
-    } else {
-      UINT32 fadeOut = afterDelay - FOOTER_FADE_F - FOOTER_SHOW_F;
-      if (fadeOut >= FOOTER_FADE_F) {
-        mFooterAlpha = 0;
-        mFooterShown = FALSE;
-      } else {
-        mFooterAlpha = (UINT8)(255U - (UINT32)EaseAlphaFrame(fadeOut, FOOTER_FADE_F));
-        mFooterShown = FALSE;
-      }
     }
   } else if (elapsedFrames < FOOTER_DELAY_F) {
     mFooterAlpha = 0;
@@ -6919,7 +6915,7 @@ STATIC VOID DrawMainMenuAnimated(UINTN Sel, UINTN Sec, BOOLEAN Cd)
   EFI_GRAPHICS_OUTPUT_BLT_PIXEL White = MkPx(255, 255, 255);
   EFI_GRAPHICS_OUTPUT_BLT_PIXEL Gray  = MkPx(222, 226, 232);
   EFI_GRAPHICS_OUTPUT_BLT_PIXEL Dim   = MkPx(195, 201, 210);
-  UINT32 TitleY, IconY, CX, TS, LS, SS, FS;
+  UINT32 TitleY, IconY, CX, TS, LS, SS;
   UINTN  i;
   UINT32 Total = mStride * mScrH;
   INT32 BarX;
@@ -6930,10 +6926,15 @@ STATIC VOID DrawMainMenuAnimated(UINTN Sel, UINTN Sec, BOOLEAN Cd)
   TS = TitleScale();
   LS = LabelScale();
   SS = StatusScale();
-  FS = FooterScale();
 
   TitleY = mScrH * 18 / 100;
   DrawStrPlainCenter(TitleY, L"Rain OS", White, TS);
+
+  {
+    CHAR16 FpsBuf[32];
+    UnicodeSPrint(FpsBuf, sizeof(FpsBuf), L"FPS %u", mFpsDisplay);
+    DrawStrPlain((INT32)(18 * UiScale()), (INT32)(16 * UiScale()), FpsBuf, Dim, LabelScale());
+  }
 
   IconY = mScrH * 54 / 100;
   CX    = mScrW / 2;
@@ -6990,16 +6991,6 @@ STATIC VOID DrawMainMenuAnimated(UINTN Sel, UINTN Sec, BOOLEAN Cd)
         UnicodeSPrint(Buf, sizeof(Buf),
                       L"Booting (%s) in %u seconds", gBootLabel[0], Sec);
         DrawStrPlainCenter(mScrH * 86 / 100, Buf, Dim, SS);
-      }
-
-      {
-        UINT32 FY  = mScrH * 91 / 100;
-        UINT32 FW1 = StrPxW(L"Boot (Enter)", FS);
-        UINT32 FW2 = StrPxW(L"Settings (Space)", FS);
-        UINT32 Margin = mScrW / 40;
-        DrawStrPlain(mScrW - FW1 - Margin, FY, L"Boot (Enter)", Dim, FS);
-        DrawStrPlain(mScrW - FW2 - Margin, FY + FS * 18,
-                     L"Settings (Space)", Dim, FS);
       }
 
       for (i = 0; i < Total; i++) {
@@ -7314,45 +7305,44 @@ CardsTop = LineY + 16 * S;
 CardR = 14 * S;
 if (CardR < 10) CardR = 10;
 
-TextScale = FooterScale() + 1;
+TextScale = FooterScale();
+if (TextScale < 1) TextScale = 1;
 
 for (i = 0; i < (UINT32)Cnt; i++) {
   UINT32 Cy = CardsTop + i * (CardH + GapY);
   UINT32 IconSz = 24 * S;
-  UINT32 IconX  = X0 + 26 * S;
-  UINT32 IconY  = Cy + (CardH / 2);
+  UINT32 IconX  = X0 + PanelW / 2;
+  UINT32 IconY  = Cy + (CardH * 40 / 100);
 
-  UINT32 TxtY = Cy + CardH / 2 - (UiFontLinePx(TextScale) / 2);
+  UINT32 TxtY = Cy + (CardH * 66 / 100);
   UINT32 Tw   = StrPxW(Items[i], TextScale);
   INT32  TextX = (INT32)(X0 + (PanelW - Tw) / 2);
 
-  // Card background (rounded)
+  // Minimal row fill; no per-card border outlines.
   BlendRoundedRectAlpha((INT32)(X0 + 12 * S), (INT32)Cy, (INT32)CardW, (INT32)CardH, (INT32)CardR,
-                        MkPx(255,255,255), (i == (UINT32)Sel) ? 14 : 6);
+                        MkPx(255,255,255), (i == (UINT32)Sel) ? 10 : 4);
 
   if (i == (UINT32)Sel) {
-    DrawRoundedFrameAlpha((INT32)(X0 + 12 * S), (INT32)Cy, (INT32)CardW, (INT32)CardH, (INT32)CardR,
-                          MkPx(208,220,235), 44);
-    DrawLightBarAlpha(mScrW / 2, Cy + CardH - 3 * S, CardW - 24 * S, 108);
+    DrawLightBarAlpha(mScrW / 2, Cy + CardH - 3 * S, CardW - 24 * S, 96);
   }
 
-  // Icon (BMP) + label
+  // Icon above label, centered.
   if (mUtilIcons[IconIdx[i]].Data != NULL) {
     DrawUtilIcon(IconX, IconY, IconSz, IconIdx[i], 255);
   }
   DrawStrPlain(TextX, (INT32)TxtY, Items[i], (i == (UINT32)Sel) ? White : TextN, TextScale);
 }
 
-// Back icon (BMP) bottom-left of the panel
+// Back icon (BMP) top-left of the panel
 if (mUtilIcons[3].Data != NULL) {
   DrawUtilIcon((UINT32)(X0 + 22 * S),
-               (UINT32)(Y0 + PanelH - 22 * S),
+               (UINT32)(Y0 + 22 * S),
                (UINT32)(18 * S),
                3,
                255);
 } else {
   DrawStrFancy((INT32)(X0 + 16 * S),
-               (INT32)(Y0 + PanelH - UiFontLinePx(FooterScale() + 1) - 14 * S),
+               (INT32)(Y0 + 10 * S),
                L"\x2190", Dim, FooterScale() + 1);
 }
 
@@ -7622,12 +7612,19 @@ EFI_STATUS EFIAPI UefiMain(IN EFI_HANDLE ImageHandle,
     if (Timer && Idx == 1) {
       mFrameNum++;
       mAnimElapsed100ns += ANIM_INTERVAL;
+      mFpsCounter++;
+      mFpsAccum100ns += ANIM_INTERVAL;
+      if (mFpsAccum100ns >= 10000000ULL) {
+        mFpsDisplay = (UINT32)(((UINT64)mFpsCounter * 10000000ULL + (mFpsAccum100ns / 2)) / mFpsAccum100ns);
+        mFpsCounter = 0;
+        mFpsAccum100ns = 0;
+      }
 
       if (Mode == MODE_MAIN) {
         if (CdActive) {
-          UINTN secondsPassed = (UINTN)(mAnimElapsed100ns / 10000000ULL);
-          UINTN remaining = (secondsPassed >= TIMEOUT_SECONDS) ? 0 : (TIMEOUT_SECONDS - secondsPassed);
-          SecsLeft = remaining;
+          UINT64 timeout100ns = (UINT64)TIMEOUT_SECONDS * 10000000ULL;
+          UINT64 remaining100ns = (mAnimElapsed100ns >= timeout100ns) ? 0 : (timeout100ns - mAnimElapsed100ns);
+          SecsLeft = (UINTN)((remaining100ns + 10000000ULL - 1ULL) / 10000000ULL);
         }
 
         UpdateAnimations(MainSel);
