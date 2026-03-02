@@ -6798,25 +6798,10 @@ STATIC VOID InitAnimState(UINTN InitialSel)
 
 STATIC UINT64 PerfDelta100ns(VOID)
 {
-  UINT64 Now, Delta;
-  if (mPerfFreq == 0) {
-    UINT64 Start, End;
-    mPerfFreq = GetPerformanceCounterProperties(&Start, &End);
-    if (mPerfFreq == 0) mPerfFreq = 1;
-    (void)Start;
-    (void)End;
-  }
-
-  Now = GetPerformanceCounter();
-  if (mPerfLast == 0) {
-    mPerfLast = Now;
-    return ANIM_INTERVAL;
-  }
-
-  Delta = GetTimeInNanoSecond(Now - mPerfLast) / 100ULL;
-  mPerfLast = Now;
-  if (Delta == 0) Delta = ANIM_INTERVAL;
-  return Delta;
+  // Some EDK2 toolchain/library combinations used for this project do not expose
+  // high-resolution performance counter helpers in the selected library instances.
+  // Keep animation timing stable by using the fixed target frame interval.
+  return ANIM_INTERVAL;
 }
 
 STATIC VOID UpdateAnimations(UINTN Sel)
