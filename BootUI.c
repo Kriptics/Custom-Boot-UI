@@ -9,6 +9,7 @@
 #include <Library/UefiBootServicesTableLib.h>
 #include <Library/UefiRuntimeServicesTableLib.h>
 #include <Library/DevicePathLib.h>
+#include <Library/BaseLib.h>
 #include <Library/MemoryAllocationLib.h>
 #include <Library/BaseMemoryLib.h>
 #include <Library/PrintLib.h>
@@ -36,7 +37,7 @@
 
 #define LOAD_HOLD      600000
 
-#define ICON_KEY_THRESH    30
+#define ICON_KEY_THRESH    8
 #define PREF_GOP_W      2560
 #define PREF_GOP_H      1600
 
@@ -44,7 +45,7 @@
 // NOTE: UEFI GOP does not expose a reliable refresh-rate/HZ control, so we target a
 // very high internal update cadence and render as fast as firmware allows.
 // If the platform can't keep up, the UI still works and naturally runs at the max it can sustain.
-#define TARGET_FPS      480
+#define TARGET_FPS      240
 #define ANIM_INTERVAL   ((10000000ULL + (TARGET_FPS / 2)) / (TARGET_FPS)) // 100ns units
 
 // Timings expressed in milliseconds, then converted to frames for TARGET_FPS.
@@ -118,6 +119,8 @@ STATIC BOOLEAN mFooterShown     = FALSE;
 STATIC UINT32  mFpsCounter      = 0;
 STATIC UINT64  mFpsAccum100ns   = 0;
 STATIC UINT32  mFpsDisplay      = 0;
+STATIC UINT64  mPerfFreq        = 0;
+STATIC UINT64  mPerfLast        = 0;
 
 
 /* Forward declarations for helpers referenced before their definitions */
@@ -6788,6 +6791,31 @@ STATIC VOID InitAnimState(UINTN InitialSel)
   mFpsCounter = 0;
   mFpsAccum100ns = 0;
   mFpsDisplay = 0;
+  mPerfFreq = 0;
+  mPerfLast = 0;
+}
+
+STATIC UINT64 PerfDelta100ns(VOID)
+{
+  UINT64 Now, Delta;
+  if (mPerfFreq == 0) {
+    UINT64 Start, End;
+    mPerfFreq = GetPerformanceCounterProperties(&Start, &End);
+    if (mPerfFreq == 0) mPerfFreq = 1;
+    (void)Start;
+    (void)End;
+  }
+
+  Now = GetPerformanceCounter();
+  if (mPerfLast == 0) {
+    mPerfLast = Now;
+    return ANIM_INTERVAL;
+  }
+
+  Delta = GetTimeInNanoSecond(Now - mPerfLast) / 100ULL;
+  mPerfLast = Now;
+  if (Delta == 0) Delta = ANIM_INTERVAL;
+  return Delta;
 }
 
 STATIC VOID UpdateAnimations(UINTN Sel)
@@ -6902,7 +6930,7 @@ STATIC VOID DrawMainMenuAnimated(UINTN Sel, UINTN Sec, BOOLEAN Cd)
 
   DrawBackground();
 
-  TS = TitleScale();
+  TS = TitleScale() + 1;
   LS = LabelScale();
   SS = StatusScale();
 
@@ -6932,6 +6960,8 @@ STATIC VOID DrawMainMenuAnimated(UINTN Sel, UINTN Sec, BOOLEAN Cd)
     LblW = StrPxW(gBootLabel[i], LS);
     DrawStrPlain(IcCX - LblW / 2, LblY, gBootLabel[i],
                  (i == Sel) ? White : Gray, LS);
+    DrawStrPlain(IcCX - LblW / 2 + 1, LblY, gBootLabel[i],
+                 (i == Sel) ? White : Gray, LS);
 
     if (i == Sel)
       BarY = LblY + LS * 16 + mScrH / 120;
@@ -6939,7 +6969,7 @@ STATIC VOID DrawMainMenuAnimated(UINTN Sel, UINTN Sec, BOOLEAN Cd)
 
   /* Prevent startup artifact: if animation bar hasn't been initialized yet,
      place it under the selected drive instead of rendering at far-left. */
-  BarX = mBarEndX;
+  BarX = EaseOutPos(mBarStartX, mBarEndX, mBarSlideFrame, BAR_SLIDE_FRAMES);
   if (BarX <= 0) {
     INT32 FallbackCx = ((INT32)CX + (((INT32)Sel - 1) * (INT32)IconSpacing()));
     BarX = FallbackCx;
@@ -6959,33 +6989,16 @@ STATIC VOID DrawMainMenuAnimated(UINTN Sel, UINTN Sec, BOOLEAN Cd)
     }
   }
 
-  if (mFooterAlpha > 0) {
-    EFI_GRAPHICS_OUTPUT_BLT_PIXEL *TmpBuf;
-    TmpBuf = AllocatePool((UINTN)Total * sizeof(EFI_GRAPHICS_OUTPUT_BLT_PIXEL));
-    if (TmpBuf) {
-      CopyMem(TmpBuf, mBackBuf, (UINTN)Total * sizeof(EFI_GRAPHICS_OUTPUT_BLT_PIXEL));
-
-      if (Cd) {
-        CHAR16 Buf[80];
-        UnicodeSPrint(Buf, sizeof(Buf),
-                      L"Booting (%s) in %u seconds", gBootLabel[0], Sec);
-        DrawStrPlainCenter(mScrH * 86 / 100, Buf, Dim, SS);
-      }
-
-      for (i = 0; i < Total; i++) {
-        if (mBackBuf[i].Red != TmpBuf[i].Red ||
-            mBackBuf[i].Green != TmpBuf[i].Green ||
-            mBackBuf[i].Blue != TmpBuf[i].Blue) {
-          mBackBuf[i].Red   = (UINT8)((UINT32)mBackBuf[i].Red   * mFooterAlpha / 255 +
-                                      (UINT32)TmpBuf[i].Red   * (255 - (UINT32)mFooterAlpha) / 255);
-          mBackBuf[i].Green = (UINT8)((UINT32)mBackBuf[i].Green * mFooterAlpha / 255 +
-                                      (UINT32)TmpBuf[i].Green * (255 - (UINT32)mFooterAlpha) / 255);
-          mBackBuf[i].Blue  = (UINT8)((UINT32)mBackBuf[i].Blue  * mFooterAlpha / 255 +
-                                      (UINT32)TmpBuf[i].Blue  * (255 - (UINT32)mFooterAlpha) / 255);
-        }
-      }
-      FreePool(TmpBuf);
-    }
+  if (mFooterAlpha > 0 && Cd) {
+    CHAR16 Buf[80];
+    EFI_GRAPHICS_OUTPUT_BLT_PIXEL FadeDim;
+    FadeDim.Red   = (UINT8)((UINT32)Dim.Red   * mFooterAlpha / 255U);
+    FadeDim.Green = (UINT8)((UINT32)Dim.Green * mFooterAlpha / 255U);
+    FadeDim.Blue  = (UINT8)((UINT32)Dim.Blue  * mFooterAlpha / 255U);
+    FadeDim.Reserved = 0;
+    UnicodeSPrint(Buf, sizeof(Buf),
+                  L"Booting (%s) in %u seconds", gBootLabel[0], Sec);
+    DrawStrPlainCenter(mScrH * 86 / 100, Buf, FadeDim, SS);
   }
 
   Flush();
@@ -7264,10 +7277,15 @@ for (i = 0; i < 3; i++) {
 
 HeaderY = Y0 + 16 * S;
 DrawStrPlainCenter((INT32)HeaderY, L"Settings", White, StatusScale() + 1);
+DrawStrPlainCenter((INT32)HeaderY, L"Settings", White, StatusScale() + 1);
 
 LineY = HeaderY + UiFontLinePx(StatusScale() + 1) + 10 * S;
-if (PanelW > 36 * S) {
-  FillRectAlpha(X0 + 18 * S, LineY, PanelW - 36 * S, 2, MkPx(255,255,255), 28);
+{
+  UINT32 UnderW = StrPxW(L"Settings", StatusScale() + 1);
+  UnderW = UnderW * 70 / 100;
+  if (UnderW < 54 * S) UnderW = 54 * S;
+  if (UnderW > PanelW - 48 * S) UnderW = PanelW - 48 * S;
+  FillRectAlpha(X0 + (PanelW - UnderW) / 2, LineY, UnderW, 2, MkPx(255,255,255), 28);
 }
 
 CardW = PanelW - 34 * S;
@@ -7306,12 +7324,14 @@ for (i = 0; i < (UINT32)Cnt; i++) {
     DrawUtilIcon(IconX, IconY, IconSz, IconIdx[i], 255);
   }
   DrawStrPlain(TextX, (INT32)TxtY, Items[i], (i == (UINT32)Sel) ? White : TextN, TextScale);
+  DrawStrPlain(TextX + 1, (INT32)TxtY, Items[i], (i == (UINT32)Sel) ? White : TextN, TextScale);
 }
 
 // Back icon (BMP) top-left of the panel
 if (mUtilIcons[3].Data != NULL) {
+  UINT32 BackCy = HeaderY + UiFontLinePx(StatusScale() + 1) / 2;
   DrawUtilIcon((UINT32)(X0 + 22 * S),
-               (UINT32)(Y0 + 22 * S),
+               BackCy,
                (UINT32)(18 * S),
                3,
                255);
@@ -7586,9 +7606,12 @@ EFI_STATUS EFIAPI UefiMain(IN EFI_HANDLE ImageHandle,
 
     if (Timer && Idx == 1) {
       mFrameNum++;
-      mAnimElapsed100ns += ANIM_INTERVAL;
-      mFpsCounter++;
-      mFpsAccum100ns += ANIM_INTERVAL;
+      {
+        UINT64 delta100ns = PerfDelta100ns();
+        mAnimElapsed100ns += delta100ns;
+        mFpsCounter++;
+        mFpsAccum100ns += delta100ns;
+      }
       if (mFpsAccum100ns >= 10000000ULL) {
         mFpsDisplay = (UINT32)(((UINT64)mFpsCounter * 10000000ULL + (mFpsAccum100ns / 2)) / mFpsAccum100ns);
         mFpsCounter = 0;
@@ -7640,10 +7663,11 @@ EFI_STATUS EFIAPI UefiMain(IN EFI_HANDLE ImageHandle,
         continue;
       }
       if (IsMovePrev(Key) || IsMoveNext(Key)) {
+        INT32 prevX = GetItemCenterX(MainSel);
         if (IsMovePrev(Key)) MainSel = (MainSel + BOOT_COUNT - 1) % BOOT_COUNT;
         else                 MainSel = (MainSel + 1) % BOOT_COUNT;
-        mBarStartX = GetItemCenterX(MainSel);
-        mBarEndX = mBarStartX;
+        mBarStartX = prevX;
+        mBarEndX = GetItemCenterX(MainSel);
         mBarSlideFrame = 0;
         UpdateAnimations(MainSel);
         if (GfxOk) DrawMainMenuAnimated(MainSel, SecsLeft, CdActive);
